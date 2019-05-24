@@ -6,20 +6,10 @@
  */ 
 
 #include <linux/rtnetlink.h>
-#include <linux/gen_stats.h>
-#include <linux/pkt_sched.h>
-#include <bits/sockaddr.h>
-#include <asm/types.h>
-#include <sys/socket.h>
-#include <net/if.h>
 #include <unistd.h>
-
-#include <stdlib.h>
-#include <string.h>
 #include <stdio.h>
 
 #include "nlcomm.h"
-
 
 int main(int argc, char *argv[]) {
 
