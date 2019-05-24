@@ -1,6 +1,7 @@
 /*
  * nlcomm.c 
- * Uses netlink to fetch qdisc stats from kernel.
+ * Functions to create netlink socket, send and recieve requests
+ * and parse them.
  * 
  * Author: Shubham Tiwari <f2016935@pilani.bits-pilani.ac.in>
  */ 
@@ -17,141 +18,95 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include "nlcomm.h"
 
-#define MIN(a,b) (((a)<(b))?(a):(b))
-#define MAX(a,b) (((a)>(b))?(a):(b))
+   /* +----------+
+    * | nlmsghdr |
+    * |----------|
+    * |   len    |
+    * |   type   |
+    * |   flags  |
+    * |   seq    |
+    * |   pid    |
+    * +----------+
+    * 
+    * +----------------+
+    * |    msghdr      |
+    * +----------------+
+    * | msg_name       |
+    * | msg_namelen    |
+    * | msg_iov        | [nlmsghdr + payload]
+    * | msg_iovlen     |
+    * | msg_control    |
+    * | msg_controllen |
+    * | msg_flags      |
+    * +----------------+
+    * 
+    * msghdr is the actual message sent through the sendmsg() function
+    * and recieved using recvmsg().
+    * Message header name is a bit mis-leading in that its just a header. 
+    * This header data actually contains the vector to the whole netlink 
+    * message.
+    * msg_iov is the pointer to the buffer (created using malloc) containing 
+    * the actual netlink message. msg_iovlen is the number of iovecs (I/O vectors) 
+    * present in the message.
+    * 
+    * Example: A request message consists of two iovecs, first one pointing to the netlink 
+    * message header (struct nlmsghdr) and the second vector pointing to the request message. 
+    * Request message is formed using the struct appropriate to what the programmer wants 
+    * to achieve. 
+    * nlmsghdr->len is the sum of size of nlmsghdr and the request message(s). Netlink socket 
+    * is opened and is bound to the source (in our case its our userspace application, whos pid
+    * is fetched using getpid()). msghdr->msg_name is the address of struct sockaddr_nl
+    * inititalized with the destinations address (We put 0 in pid to refer to kernel).
+    * msghdr->msg_namelen is the size of sockaddr_nl.
+    * 
+    */
 
-/* 
-struct sockaddr_nl {
-  sa_family_t     nl_family; // AF_NETLINK
-  unsigned short  nl_pad;    // zero
-  __u32           nl_pid;    // process pid
-  __u32           nl_groups; // multicast grps mask
-};
-*/
-struct sockaddr_nl src_addr, dest_addr;
+   /* Netlink message format
+    * 
+    * +----------+-----+---------------+-----+-------------+-----+--------------+
+    * | nlmsghdr | Pad | Family Header | Pad | Attr Header | Pad | Attr payload |
+    * +----------+-----+---------------+-----+-------------+-----+--------------+
+    * 
+    * There can be any number of messages of in this sequence.
+    * Moreover, Attr header and Attr payload can also be in sequence together, forming 
+    * multiple attributes in the same netlink message.
+    */
 
-/* 
-struct nlmsghdr {
-  __u32  nlmsg_len;   //Length of msg incl. hdr
-  __u16  nlmsg_type;  //Message content
-  __u16  nlmsg_flags; //Additional flags
-  __u32  nlmsg_seq;   //Sequence number
-  __u32  nlmsg_pid;   //Sending process PID
-}
-*/
-//struct nlmsghdr *nlh = NULL;
-
-/* vector of data to send */
-/* struct iovec {
-	void __user *iov_base;	// BSD uses caddr_t (1003.1g requires void *) 
-	__kernel_size_t iov_len; // Must be size_t (1003.1g) 
-};
-*/
-//struct iovec iov;
-
-/* number of I/O vector entries */
-//size_t iovlen;
-
-/* socket file descriptor */ 
-int sock_fd;
-
-/* struct msghdr {
-  void *msg_name;        //Address to send to
-  socklen_t msg_namelen; //Length of address data
-
-  struct iovec *msg_iov; //Vector of data to send
-  size_t msg_iovlen;     //Number of iovec entries
-
-  void *msg_control;     //Ancillary data
-  size_t msg_controllen; //Ancillary data buf len
-
-  int msg_flags;         //Flags on received msg
-};
-*/
-//struct msghdr msg;
-
-int main(int argc, char *argv[]) {
-
-    /* Open a netlink socket */ 
-    sock_fd = socket(PF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
+int nl_sock() {
+    int sock_fd = socket(PF_NETLINK, SOCK_RAW, NETLINK_ROUTE);
     if (sock_fd < 0) {
         printf("\n Failed to open netlink socket");
         return -1;
     }
 
+    /* 
+        struct sockaddr_nl {
+        sa_family_t     nl_family; // AF_NETLINK
+        unsigned short  nl_pad;    // zero
+        __u32           nl_pid;    // process pid
+        __u32           nl_groups; // multicast grps mask
+        };
+    */
+
+    struct sockaddr_nl src_addr;
+
     memset(&src_addr, 0, sizeof(src_addr));
     src_addr.nl_family = AF_NETLINK;
     src_addr.nl_pid = getpid();
 
-    memset(&dest_addr, 0, sizeof(dest_addr));
-    dest_addr.nl_family = AF_NETLINK;
-    dest_addr.nl_pid = 0; /* For linux kernel */
-    dest_addr.nl_groups = 0; /* unicast */
-
-
-    /* Once socket is opened, it has to be bound to a local address */
+    /* Once socket is opened, it has to be bound to local address */
     int rtnl = bind(sock_fd, (struct sockaddr *)&src_addr, sizeof(src_addr));
     if (rtnl < 0) {
         printf("\n Failed to bind local address to the socket");
         return -1;
     }
 
-    
-    /* +----------+
-     * | nlmsghdr |
-     * |----------|
-     * |   len    |
-     * |   type   |
-     * |   flags  |
-     * |   seq    |
-     * |   pid    |
-     * +----------+
-     * 
-     * +----------------+
-     * |    msghdr      |
-     * +----------------+
-     * | msg_name       |
-     * | msg_namelen    |
-     * | msg_iov        | [nlmsghdr + payload]
-     * | msg_iovlen     |
-     * | msg_control    |
-     * | msg_controllen |
-     * | msg_flags      |
-     * +----------------+
-     * 
-     * msghdr is the actual message sent through the sendmsg() function
-     * and recieved using recvmsg().
-     * Message header name is a bit mis-leading in that its just a header. 
-     * This header data actually contains the vector to the whole netlink 
-     * message.
-     * msg_iov is the pointer to the buffer (created using malloc) containing 
-     * the actual netlink message. msg_iovlen is the number of iovecs (I/O vectors) 
-     * present in the message.
-     * 
-     * Example: A request message consists of two iovecs, first one pointing to the netlink 
-     * message header (struct nlmsghdr) and the second vector pointing to the request message. 
-     * Request message is formed using the struct appropriate to what the programmer wants 
-     * to achieve. 
-     * nlmsghdr->len is the sum of size of nlmsghdr and the request message(s). Netlink socket 
-     * is opened and is bound to the source (in our case its our userspace application, whos pid
-     * is fetched using getpid()). msghdr->msg_name is the address of struct sockaddr_nl
-     * inititalized with the destinations address (We put 0 in pid to refer to kernel).
-     * msghdr->msg_namelen is the size of sockaddr_nl.
-     * 
-     */
+    return sock_fd;
+}
 
-    /* Netlink message format
-     * 
-     * +----------+-----+---------------+-----+-------------+-----+--------------+
-     * | nlmsghdr | Pad | Family Header | Pad | Attr Header | Pad | Attr payload |
-     * +----------+-----+---------------+-----+-------------+-----+--------------+
-     * 
-     * There can be any number of messages of in this sequence.
-     * Moreover, Attr header and Attr payload can also be in sequence together, forming 
-     * multiple attributes in the same netlink message.
-     */
-
+int nl_dump_qdisc_request(int sock_fd, void (*cb)(char *, int)) {
     struct tcmsg t = { .tcm_family = AF_UNSPEC };
     char d[IFNAMSIZ] = {};
     strncpy(d, "enp7s0", sizeof(d)-1);
@@ -165,20 +120,68 @@ int main(int argc, char *argv[]) {
     int type = RTM_GETQDISC;
     int len = sizeof(t);
 
+    /* 
+        struct nlmsghdr {
+            __u32  nlmsg_len;   //Length of msg incl. hdr
+            __u16  nlmsg_type;  //Message content
+            __u16  nlmsg_flags; //Additional flags
+            __u32  nlmsg_seq;   //Sequence number
+            __u32  nlmsg_pid;   //Sending process PID
+        }
+    */
+
     struct nlmsghdr nlh = {
         .nlmsg_len = NLMSG_LENGTH(len),
         .nlmsg_type = type,
         .nlmsg_flags = NLM_F_DUMP | NLM_F_REQUEST,
         .nlmsg_seq = 0,
     };
+
+    /* vector of data to send */
+    /*  
+        struct iovec {
+            void __user *iov_base;	// BSD uses caddr_t (1003.1g requires void *) 
+            __kernel_size_t iov_len; // Must be size_t (1003.1g) 
+        };
+    */
     struct iovec iov[2] = {
         { .iov_base = &nlh, .iov_len = sizeof(nlh) },
         { .iov_base = req, .iov_len = len }
     };
 
+    /* 
+        struct sockaddr_nl {
+            sa_family_t     nl_family; // AF_NETLINK
+            unsigned short  nl_pad;    // zero
+            __u32           nl_pid;    // process pid
+            __u32           nl_groups; // multicast grps mask
+        };
+    */
+
+    struct sockaddr_nl dst_addr;
+
+    memset(&dst_addr, 0, sizeof(dst_addr));
+    dst_addr.nl_family = AF_NETLINK;
+    dst_addr.nl_pid = 0; /* For linux kernel */
+    dst_addr.nl_groups = 0; /* unicast */
+
+   /* struct msghdr {
+        void *msg_name;        //Address to send to
+        socklen_t msg_namelen; //Length of address data
+
+        struct iovec *msg_iov; //Vector of data to send
+        size_t msg_iovlen;     //Number of iovec entries
+
+        void *msg_control;     //Ancillary data
+        size_t msg_controllen; //Ancillary data buf len
+
+        int msg_flags;         //Flags on received msg
+    };
+*/
+
     struct msghdr msg = {
-        .msg_name = &dest_addr,
-        .msg_namelen = sizeof(dest_addr),
+        .msg_name = &dst_addr,
+        .msg_namelen = sizeof(dst_addr),
         .msg_iov = iov,
         .msg_iovlen = 2,
     };
@@ -194,6 +197,7 @@ int main(int argc, char *argv[]) {
     iovrecv.iov_base = NULL;
     iovrecv.iov_len = 0;
 
+
     struct msghdr msg_recv = {
         .msg_name = &nladdr,
         .msg_namelen = sizeof(nladdr),
@@ -203,7 +207,7 @@ int main(int argc, char *argv[]) {
 
     char *buf;
 
-    /* Determine bufer length for recieving the message */
+    /* Determine buffer length for recieving the message */
 
     int recvlen = recvmsg(sock_fd, &msg_recv, MSG_PEEK | MSG_TRUNC);
     if (recvlen < 32768)
@@ -222,13 +226,31 @@ int main(int argc, char *argv[]) {
     if (recvlen <0) {
         free(buf);
         printf("\n Error during netlink msg recv: len < 0");
-        exit(0);
+        return -1;
     }
 
     /* At this point of time, buf contains the message */
 
     printf("\nRecieved msg len: %d", recvlen);
     printf("\nRecieved message payload: %s", (char *)buf);
+
+    (*cb)(buf, recvlen);
+}
+
+void nl_parse_attr(struct rtattr *rta, int len, struct rtattr *tb[], int max) {
+    memset(tb, 0, sizeof(struct rtattr *)*(max+1));
+    unsigned short type;
+    while (RTA_OK(rta, len)) {
+        type = rta->rta_type;
+        if ((type <= max) && (!tb[type])) {
+            tb[type] = rta;    
+        }
+
+        rta = RTA_NEXT(rta, len);
+    }
+}
+
+void nl_print_qdisc_stats(char *buf, int recvlen) {
 
     struct nlmsghdr *h = (struct nlmsghdr *)buf;
     int msglen = recvlen;
@@ -274,17 +296,8 @@ int main(int argc, char *argv[]) {
         /* Parse attributes */
         struct rtattr *rta = TCA_RTA(tcrecv);
 
-        memset(tb, 0, sizeof(struct rtattr *)*(TCA_MAX+1));
-        unsigned short type;
-        while (RTA_OK(rta, len)) {
-            type = rta->rta_type;
-            if ((type <= TCA_MAX) && (!tb[type])) {
-                tb[type] = rta;    
-            }
-
-            rta = RTA_NEXT(rta, len);
-        }
-
+        nl_parse_attr(rta, len, tb, TCA_MAX);
+        
         if (tb[TCA_KIND] == NULL) {
             printf("\nNULL KIND!");
             exit(0);
@@ -298,7 +311,7 @@ int main(int argc, char *argv[]) {
         printf("[%08x]", tcrecv->tcm_handle);
 
         /* Print dev name using if_indextoname */
-    
+        char d[IFNAMSIZ] = {};
         printf("dev %s", if_indextoname(tcrecv->tcm_ifindex, d));
 
         if (tcrecv->tcm_parent == TC_H_ROOT)
@@ -318,16 +331,7 @@ int main(int argc, char *argv[]) {
         rta = RTA_DATA(tb[TCA_STATS2]);
         len = RTA_PAYLOAD(tb[TCA_STATS2]);
 
-        memset(tbs, 0, sizeof(struct rtattr *)*(TCA_STATS_MAX+1));
-        
-        while (RTA_OK(rta, len)) {
-            type = rta->rta_type;
-            if ((type <= TCA_STATS_MAX) && (!tbs[type])) {
-                tbs[type] = rta;    
-            }
-
-            rta = RTA_NEXT(rta, len);
-        }
+        nl_parse_attr(rta, len, tbs, TCA_STATS_MAX);
 
         /* tc stats structs present in linux/gen_stats.h 
            They have been pasted below for reference 
@@ -426,7 +430,9 @@ int main(int argc, char *argv[]) {
         h = NLMSG_NEXT(h, msglen);
     }
     free(buf);
-    close(sock_fd);
-    printf("\n");
-}      
+}
+
+
+
+
 
