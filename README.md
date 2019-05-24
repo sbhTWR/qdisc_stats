@@ -21,7 +21,7 @@ Check if the kernel headers (with the correct version) have been installed:
 ### Compile
 Execute the following command in the terminal in the path containing nlcomm.c:
 
-```gcc nlcomm.c -o qdisc_stats```
+```gcc nlcomm.c qstats.c -o qdisc_stats```
 
 This should generate a binary file named qdisc_stats in the current working directory.
 
